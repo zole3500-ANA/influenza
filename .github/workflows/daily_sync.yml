@@ -1,0 +1,38 @@
+name: Daily Influenza HDC Sync
+
+on:
+  schedule:
+    # 02:00 UTC is 09:00 AM Indochina Time (Bangkok GMT+7)
+    - cron: '0 2 * * *'
+  workflow_dispatch: # Allows manual trigger from the Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Playwright Browsers
+        run: |
+          uv pip install playwright openpyxl
+          uv run playwright install chromium --with-deps
+
+      - name: Configure Git
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+      - name: Run NHSO Sync Script
+        env:
+          TZ: Asia/Bangkok
+        run: |
+          uv run sync_nhso_influenza.py
