@@ -31,6 +31,15 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
 
+      - name: Install OpenVPN
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openvpn
+
+      - name: Connect to Thailand VPN
+        run: |
+          python vpn_connect.py
+
       - name: Run NHSO Sync Script
         env:
           TZ: Asia/Bangkok
