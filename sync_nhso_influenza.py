@@ -66,45 +66,60 @@ def scrape_nhso_data():
             page.goto(url, timeout=90000, wait_until="domcontentloaded")
             print("DOM โหลดสำเร็จ กำลังรอ Tableau Viz ทำงาน...")
             
-            # Wait for interactive workbook status
-            page.evaluate("""
-                async () => {
-                    await new Promise((resolve) => {
-                        const timer = setInterval(() => {
-                            const viz = document.getElementById("tableau-viz");
-                            if (viz && viz.workbook && viz.workbook.publishedSheetsInfo) {
-                                clearInterval(timer);
-                                resolve();
-                            }
-                        }, 1000);
-                        setTimeout(() => {
-                            clearInterval(timer);
-                            resolve();
-                        }, 40000);
-                    });
-                }
-            """)
-            print("Tableau Viz (Workbook) พร้อมทำงานแล้ว สลับไปยังแท็บรายงานบริการ...")
+            # Give the page extra time to fully initialize Tableau
+            page.wait_for_timeout(10000)
             
-            # Switch to Dashboard รายงานบริการ and pull rpt summary data
+            # Combined: wait for workbook readiness + switch sheet + pull data
+            # Uses try-catch to handle the workbookImpl race condition
             js_query = """
                 async () => {
+                    // Phase 1: Wait for Tableau Viz workbook to fully initialize
+                    const maxWaitMs = 60000;
+                    const startTime = Date.now();
+                    
+                    while (Date.now() - startTime < maxWaitMs) {
+                        try {
+                            const viz = document.getElementById("tableau-viz");
+                            if (viz && viz.workbook && viz.workbook.publishedSheetsInfo && viz.workbook.publishedSheetsInfo.length > 3) {
+                                break; // Ready!
+                            }
+                        } catch (e) {
+                            // workbookImpl not ready yet, keep waiting
+                        }
+                        await new Promise(r => setTimeout(r, 2000));
+                    }
+                    
+                    // Phase 2: Verify workbook is truly ready
                     const viz = document.getElementById("tableau-viz");
-                    const workbook = viz.workbook;
-                    const sheetName = workbook.publishedSheetsInfo[3].name; // Dashboard รายงานบริการ
+                    if (!viz) return { error: "tableau-viz element not found" };
+                    
+                    let workbook;
+                    try {
+                        workbook = viz.workbook;
+                        if (!workbook || !workbook.publishedSheetsInfo) {
+                            return { error: "Workbook not ready after waiting " + maxWaitMs + "ms" };
+                        }
+                    } catch (e) {
+                        return { error: "Workbook access error: " + e.message };
+                    }
+                    
+                    // Phase 3: Switch to Dashboard รายงานบริการ (index 3)
+                    const sheetName = workbook.publishedSheetsInfo[3].name;
                     const activeSheet = await workbook.activateSheetAsync(sheetName);
                     
-                    // Wait for rendering
-                    await new Promise(r => setTimeout(r, 8000));
+                    // Wait for the new sheet to fully render
+                    await new Promise(r => setTimeout(r, 12000));
                     
+                    // Phase 4: Find rpt worksheet and pull data
                     const rptWs = activeSheet.worksheets.find(ws => ws.name === "rpt");
-                    if (!rptWs) return { error: "Worksheet rpt not found" };
+                    if (!rptWs) return { error: "Worksheet rpt not found in active sheet. Available: " + activeSheet.worksheets.map(w => w.name).join(", ") };
                     
                     const dataTable = await rptWs.getSummaryDataAsync({
-                        maxRows: 0, // get all rows
+                        maxRows: 0,
                         ignoreSelection: true
                     });
                     
+                    // Phase 5: Filter for Kalasin networks
                     const kalasinNetworks = new Set([
                         '10709', '11077', '11078', '11079', '11080', '11081',
                         '11082', '11083', '11084', '11085', '11086', '11087',
@@ -130,7 +145,26 @@ def scrape_nhso_data():
                 }
             """
             
-            result = page.evaluate(js_query)
+            # Retry up to 3 times
+            result = None
+            last_error = None
+            for attempt in range(1, 4):
+                print(f"  ▶ ความพยายามครั้งที่ {attempt}/3...")
+                try:
+                    result = page.evaluate(js_query)
+                    if result and result.get("success"):
+                        break
+                    last_error = result.get("error", "Unknown error") if result else "No result"
+                    print(f"  ⚠️ ครั้งที่ {attempt} ไม่สำเร็จ: {last_error}")
+                except Exception as e:
+                    last_error = str(e)
+                    print(f"  ⚠️ ครั้งที่ {attempt} เกิด exception: {last_error}")
+                
+                if attempt < 3:
+                    print("  ⏳ รอ 15 วินาทีแล้วลองใหม่...")
+                    # Reload the page for a fresh retry
+                    page.goto(url, timeout=90000, wait_until="domcontentloaded")
+                    page.wait_for_timeout(15000)
             
             if not result or "error" in result:
                 print("❌ เกิดข้อผิดพลาดในการดึงข้อมูลจาก Tableau:", result.get("error", "Unknown error"))
